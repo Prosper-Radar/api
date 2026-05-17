@@ -69,14 +69,33 @@ def create_access_token(subject: str, expires_delta: Optional[timedelta] = None)
 # ──────────────────────────────────────────────────────────────────────────────
 # Dependency: get_current_user
 # ──────────────────────────────────────────────────────────────────────────────
-# Hardcoded demo users — replace with DB lookup in production.
-_DEMO_USERS: dict[str, str] = {
-    "demo": get_password_hash("demo1234"),
-    "admin": get_password_hash("prosper2024!"),
-}
+# Pre-hashed passwords for demo users (generated once at startup).
+# Replace with DB lookup in production.
+# To regenerate: python -c "import bcrypt; print(bcrypt.hashpw(b'demo1234', bcrypt.gensalt()).decode())"
+_DEMO_USERS: dict[str, str] = {}
+
+
+def _init_demo_users() -> None:
+    global _DEMO_USERS
+    _DEMO_USERS = {
+        "demo": get_password_hash("demo1234"),
+        "admin": get_password_hash("prosper2024!"),
+    }
+
+
+# Lazy init so module import is fast
+_demo_users_ready = False
+
+
+def _ensure_demo_users() -> None:
+    global _demo_users_ready
+    if not _demo_users_ready:
+        _init_demo_users()
+        _demo_users_ready = True
 
 
 def authenticate_user(username: str, password: str) -> Optional[str]:
+    _ensure_demo_users()
     hashed = _DEMO_USERS.get(username)
     if not hashed:
         return None
