@@ -13,10 +13,10 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import bcrypt as _bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 from pydantic import BaseModel
 
 from app.core.config import get_settings
@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/token", auto_error=False)
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -47,15 +46,15 @@ class TokenPayload(BaseModel):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Helpers
+# Helpers — using bcrypt directly (bcrypt 5.x, passlib-free)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def verify_password(plain: str, hashed: str) -> bool:
-    return pwd_context.verify(plain, hashed)
+    return _bcrypt.checkpw(plain.encode(), hashed.encode())
 
 
 def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
+    return _bcrypt.hashpw(password.encode(), _bcrypt.gensalt()).decode()
 
 
 def create_access_token(subject: str, expires_delta: Optional[timedelta] = None) -> str:
