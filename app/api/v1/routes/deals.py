@@ -1,18 +1,165 @@
+"""
+Deals routes.
+
+Current DB uses the Drizzle seed schema:
+  parcels:     id, folio, address_line, city, state, zip, county, lat, lng,
+               acreage, zoning, created_at, updated_at
+  deal_scores: id, parcel_id, total_score, breakdown (jsonb {momentum, location,
+               value, liquidity}), model_version, computed_at
+
+Individual score columns (waterfront_score, zoning_score, …, tier) do NOT exist
+yet — they come from breakdown jsonb or are derived.
+"""
 from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc, func as sa_func
+from sqlalchemy import text
 from typing import Optional
 from uuid import UUID
 
 from app.core.limiter import limiter
 from app.core.security import get_current_user
 from app.db.session import get_db
-from app.db.models.parcel import Parcel
-from app.db.models.deal_score import DealScore
 from app.db.models.watchlist import WatchlistItem
 
 router = APIRouter(prefix="/deals", tags=["deals"])
 
+_TIER_EXPR = """
+    CASE
+        WHEN ds.total_score >= 80 THEN 'A'
+        WHEN ds.total_score >= 65 THEN 'B'
+        ELSE 'C'
+    END
+"""
+
+_LIST_SQL = text(f"""
+SELECT
+    p.id,
+    -- prefer scraper columns; fall back to drizzle seed columns
+    COALESCE(p.parcel_id, p.folio, '')                AS parcel_id,
+    COALESCE(p.county, 'miami-dade')                  AS county,
+    COALESCE(p.address, p.address_line, '')           AS address,
+    p.owner_name,
+    p.land_value,
+    COALESCE(p.lot_size_sqft,
+             p.acreage * 43560)                       AS lot_size_sqft,
+    COALESCE(p.zoning_code, p.zoning)                 AS zoning_code,
+    p.last_sale_date,
+    p.last_sale_price,
+    -- prefer geometry centroid, fall back to lat/lng floats
+    CASE WHEN p.geometry IS NOT NULL
+         THEN ST_Y(ST_Centroid(p.geometry))
+         ELSE p.lat END                               AS lat,
+    CASE WHEN p.geometry IS NOT NULL
+         THEN ST_X(ST_Centroid(p.geometry))
+         ELSE p.lng END                               AS lng,
+    -- prefer individual score columns (from scraper scoring); fall back to jsonb
+    COALESCE(ds.waterfront_score,
+             (ds.breakdown->>'location')::numeric / 2)  AS waterfront_score,
+    COALESCE(ds.zoning_score,
+             (ds.breakdown->>'value')::numeric)          AS zoning_score,
+    COALESCE(ds.price_score,
+             (ds.breakdown->>'value')::numeric)          AS price_score,
+    COALESCE(ds.lot_size_score,
+             (ds.breakdown->>'momentum')::numeric)       AS lot_size_score,
+    COALESCE(ds.population_score,
+             (ds.breakdown->>'location')::numeric)       AS population_score,
+    COALESCE(ds.traffic_score,
+             (ds.breakdown->>'liquidity')::numeric)      AS traffic_score,
+    COALESCE(ds.recency_score, 50)                    AS recency_score,
+    COALESCE(ds.total_score, 0)                       AS total_score,
+    COALESCE(ds.tier, {_TIER_EXPR})                   AS tier
+FROM parcels p
+JOIN deal_scores ds ON ds.parcel_id = p.id
+WHERE COALESCE(ds.total_score, 0) >= :min_score
+  AND (CAST(:county AS text) IS NULL OR LOWER(COALESCE(p.county, '')) = LOWER(CAST(:county AS text)))
+  AND (CAST(:tier AS text)   IS NULL OR COALESCE(ds.tier, {_TIER_EXPR}) = CAST(:tier AS text))
+ORDER BY ds.total_score DESC
+LIMIT  :limit
+OFFSET :offset
+""")
+
+_GET_SQL = text(f"""
+SELECT
+    p.id,
+    COALESCE(p.parcel_id, p.folio, '')                AS parcel_id,
+    COALESCE(p.county, 'miami-dade')                  AS county,
+    COALESCE(p.address, p.address_line, '')           AS address,
+    p.owner_name,
+    p.owner_address,
+    p.land_value,
+    p.building_value,
+    COALESCE(p.lot_size_sqft, p.acreage * 43560)      AS lot_size_sqft,
+    COALESCE(p.zoning_code, p.zoning)                 AS zoning_code,
+    p.last_sale_date,
+    p.last_sale_price,
+    CASE WHEN p.geometry IS NOT NULL
+         THEN ST_Y(ST_Centroid(p.geometry))
+         ELSE p.lat END                               AS lat,
+    CASE WHEN p.geometry IS NOT NULL
+         THEN ST_X(ST_Centroid(p.geometry))
+         ELSE p.lng END                               AS lng,
+    COALESCE(ds.waterfront_score,
+             (ds.breakdown->>'location')::numeric / 2)  AS waterfront_score,
+    COALESCE(ds.zoning_score,
+             (ds.breakdown->>'value')::numeric)          AS zoning_score,
+    COALESCE(ds.price_score,
+             (ds.breakdown->>'value')::numeric)          AS price_score,
+    COALESCE(ds.lot_size_score,
+             (ds.breakdown->>'momentum')::numeric)       AS lot_size_score,
+    COALESCE(ds.population_score,
+             (ds.breakdown->>'location')::numeric)       AS population_score,
+    COALESCE(ds.traffic_score,
+             (ds.breakdown->>'liquidity')::numeric)      AS traffic_score,
+    COALESCE(ds.recency_score, 50)                    AS recency_score,
+    COALESCE(ds.total_score, 0)                       AS total_score,
+    COALESCE(ds.tier, {_TIER_EXPR})                   AS tier,
+    ds.computed_at
+FROM parcels p
+JOIN deal_scores ds ON ds.parcel_id = p.id
+WHERE p.id = :deal_id
+LIMIT 1
+""")
+
+
+def _f(v) -> Optional[float]:
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _row_to_deal(row) -> dict:
+    return {
+        "id":              str(row.id),
+        "parcel_id":       row.parcel_id or "",
+        "county":          row.county or "",
+        "address":         row.address or "",
+        "owner_name":      row.owner_name,
+        "land_value":      row.land_value,
+        "lot_size_sqft":   _f(row.lot_size_sqft) or 0.0,
+        "zoning_code":     row.zoning_code,
+        "last_sale_date":  row.last_sale_date.isoformat() if row.last_sale_date else None,
+        "last_sale_price": row.last_sale_price,
+        "lat":             _f(row.lat),
+        "lng":             _f(row.lng),
+        "scores": {
+            "waterfront":        _f(row.waterfront_score),
+            "zoning":            _f(row.zoning_score) or 0.0,
+            "price_range":       _f(row.price_score) or 0.0,
+            "lot_size":          _f(row.lot_size_score) or 0.0,
+            "population_growth": _f(row.population_score),
+            "traffic":           _f(row.traffic_score),
+            "recency":           _f(row.recency_score) or 50.0,
+            "total":             _f(row.total_score) or 0.0,
+        },
+        "tier":            row.tier or "C",
+        "missing_metrics": [],
+    }
+
+
+# ── Routes ──────────────────────────────────────────────────────────────────
 
 @router.get("")
 @limiter.limit("60/minute")
@@ -25,99 +172,31 @@ async def list_deals(
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
 ):
-    lng_expr = sa_func.ST_X(sa_func.ST_Centroid(Parcel.geometry))
-    lat_expr = sa_func.ST_Y(sa_func.ST_Centroid(Parcel.geometry))
-
-    query = (
-        select(Parcel, DealScore, lng_expr.label("lng"), lat_expr.label("lat"))
-        .join(DealScore, DealScore.parcel_id == Parcel.id)
-        .where(DealScore.total_score >= min_score)
-        .order_by(desc(DealScore.total_score))
-        .limit(limit)
-        .offset(offset)
-    )
-
-    if tier:
-        query = query.where(DealScore.tier == tier)
-    if county:
-        query = query.where(Parcel.county == county)
-
-    result = await db.execute(query)
+    result = await db.execute(_LIST_SQL, {
+        "min_score": min_score,
+        "county":    county,
+        "tier":      tier,
+        "limit":     limit,
+        "offset":    offset,
+    })
     rows = result.all()
-
-    deals = []
-    for row in rows:
-        parcel, score, lng, lat = row[0], row[1], row[2], row[3]
-        deals.append({
-            "id": str(parcel.id),
-            "parcel_id": parcel.parcel_id,
-            "county": parcel.county,
-            "address": parcel.address,
-            "owner_name": parcel.owner_name,
-            "land_value": parcel.land_value,
-            "lot_size_sqft": float(parcel.lot_size_sqft or 0),
-            "zoning_code": parcel.zoning_code,
-            "last_sale_date": parcel.last_sale_date.isoformat() if parcel.last_sale_date else None,
-            "last_sale_price": parcel.last_sale_price,
-            "lng": float(lng) if lng is not None else None,
-            "lat": float(lat) if lat is not None else None,
-            "scores": {
-                "waterfront":        float(score.waterfront_score or 0),
-                "zoning":            float(score.zoning_score or 0),
-                "price_range":       float(score.price_score or 0),
-                "lot_size":          float(score.lot_size_score or 0),
-                "population_growth": float(score.population_score or 0),
-                "traffic":           float(score.traffic_score or 0),
-                "recency":           float(score.recency_score or 0),
-                "total":             float(score.total_score or 0),
-            },
-            "tier": score.tier,
-            "missing_metrics": [],  # populated after scoring engine upgrade
-        })
-
-    return {"deals": deals, "meta": {"offset": offset, "limit": limit}}
+    return {
+        "deals": [_row_to_deal(r) for r in rows],
+        "meta": {"offset": offset, "limit": limit, "total": len(rows)},
+    }
 
 
 @router.get("/{deal_id}")
 async def get_deal(deal_id: UUID, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Parcel, DealScore)
-        .join(DealScore, DealScore.parcel_id == Parcel.id)
-        .where(Parcel.id == deal_id)
-        .order_by(desc(DealScore.computed_at))
-        .limit(1)
-    )
+    result = await db.execute(_GET_SQL, {"deal_id": deal_id})
     row = result.first()
     if not row:
         raise HTTPException(status_code=404, detail="Deal not found")
-
-    parcel, score = row
-    return {
-        "id": str(parcel.id),
-        "parcel_id": parcel.parcel_id,
-        "county": parcel.county,
-        "address": parcel.address,
-        "owner_name": parcel.owner_name,
-        "owner_address": parcel.owner_address,
-        "land_value": parcel.land_value,
-        "building_value": parcel.building_value,
-        "lot_size_sqft": float(parcel.lot_size_sqft or 0),
-        "zoning_code": parcel.zoning_code,
-        "last_sale_date": parcel.last_sale_date.isoformat() if parcel.last_sale_date else None,
-        "last_sale_price": parcel.last_sale_price,
-        "scores": {
-            "waterfront":        float(score.waterfront_score or 0),
-            "zoning":            float(score.zoning_score or 0),
-            "price_range":       float(score.price_score or 0),
-            "lot_size":          float(score.lot_size_score or 0),
-            "population_growth": float(score.population_score or 0),
-            "traffic":           float(score.traffic_score or 0),
-            "recency":           float(score.recency_score or 0),
-            "total":             float(score.total_score or 0),
-        },
-        "tier": score.tier,
-        "score_computed_at": score.computed_at.isoformat(),
-    }
+    deal = _row_to_deal(row)
+    deal["owner_address"] = getattr(row, "owner_address", None)
+    deal["building_value"] = getattr(row, "building_value", None)
+    deal["score_computed_at"] = row.computed_at.isoformat() if row.computed_at else None
+    return deal
 
 
 @router.post("/{deal_id}/watchlist")
