@@ -29,8 +29,7 @@ _OUT_FIELDS = ",".join([
     "ADDRESS",         # property address
     "LANDVAL",         # assessed land value ($)
     "BLDGVAL",         # assessed building value ($)
-    "DОРАL",           # total assessed value — field name varies; we try TOTALVAL too
-    "TOTALVAL",
+    "TOTALVAL",        # total assessed value
     "ACREAGE",         # lot size in acres → converted to sqft
     "ZONINGCD",        # zoning code
     "SALESDATE",       # last sale date (MM/DD/YYYY)
@@ -54,14 +53,13 @@ async def fetch_parcels(
     Returns a list of raw feature dicts (ArcGIS JSON format).
     """
     params = {
-        "where": "ACREAGE > 0",        # basic filter — skip empty records
+        "where": "ACREAGE >= 0.1",     # skip empty/micro parcels
         "outFields": _OUT_FIELDS,
         "resultOffset": offset,
         "resultRecordCount": limit,
-        "orderByFields": "PARCELNO ASC",
+        "orderByFields": "OBJECTID ASC",
         "returnGeometry": "true",
         "outSR": "4326",
-        "geometryType": "esriGeometryPolygon",
         "f": "json",
     }
 
@@ -99,8 +97,7 @@ def normalize_parcel(raw: dict[str, Any]) -> dict[str, Any]:
     acreage = float(attrs.get("ACREAGE") or 0)
     lot_size_sqft = acreage * 43_560
 
-    # Total value — field name may differ
-    total_val = int(attrs.get("TOTALVAL") or attrs.get("DОРАL") or 0)
+    total_val = int(attrs.get("TOTALVAL") or 0)
 
     return {
         "parcel_id":      attrs.get("PARCELNO", ""),
