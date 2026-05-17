@@ -1,9 +1,11 @@
-from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi import APIRouter, Depends, Query, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func as sa_func
 from typing import Optional
 from uuid import UUID
 
+from app.core.limiter import limiter
+from app.core.security import get_current_user
 from app.db.session import get_db
 from app.db.models.parcel import Parcel
 from app.db.models.deal_score import DealScore
@@ -13,7 +15,9 @@ router = APIRouter(prefix="/deals", tags=["deals"])
 
 
 @router.get("")
+@limiter.limit("60/minute")
 async def list_deals(
+    request: Request,
     tier: Optional[str] = Query(None, pattern="^[ABC]$"),
     county: Optional[str] = None,
     min_score: float = 0,
@@ -120,14 +124,11 @@ async def get_deal(deal_id: UUID, db: AsyncSession = Depends(get_db)):
 async def add_to_watchlist(
     deal_id: UUID,
     notes: Optional[str] = None,
-    added_by: str = Query("demo", description="User key — use real auth in production"),
     db: AsyncSession = Depends(get_db),
+    current_user: str = Depends(get_current_user),
 ):
-    """
-    Add a deal to the watchlist.
-    `added_by` is passed as a query param for now; wire to JWT sub in Sprint 4.
-    """
-    item = WatchlistItem(parcel_id=deal_id, added_by=added_by, notes=notes)
+    """Add a deal to the watchlist. Uses JWT sub as added_by."""
+    item = WatchlistItem(parcel_id=deal_id, added_by=current_user, notes=notes)
     db.add(item)
     await db.commit()
-    return {"status": "added", "id": str(item.id), "added_by": added_by}
+    return {"status": "added", "id": str(item.id), "added_by": current_user}
