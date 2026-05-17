@@ -121,13 +121,19 @@ def traffic_score(aadt: int) -> float:
     return min(100.0, (aadt / 100_000.0) * 100.0)
 
 
-def recency_score(last_sale: Optional[date]) -> float:
+def recency_score(last_sale) -> float:
     """
     Older sale = more negotiable = higher score.
     No sale date = neutral 50 (could be long-held family land).
+    Accepts date objects or ISO-format strings.
     """
     if last_sale is None:
         return 50.0
+    if isinstance(last_sale, str):
+        try:
+            last_sale = date.fromisoformat(last_sale[:10])
+        except ValueError:
+            return 50.0
     years_ago = (date.today() - last_sale).days / 365.25
     return min(100.0, years_ago * 10.0)
 
