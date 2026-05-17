@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func as sa_func
 from typing import Optional
 from uuid import UUID
 
@@ -21,8 +21,11 @@ async def list_deals(
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
 ):
+    lng_expr = sa_func.ST_X(sa_func.ST_Centroid(Parcel.geometry))
+    lat_expr = sa_func.ST_Y(sa_func.ST_Centroid(Parcel.geometry))
+
     query = (
-        select(Parcel, DealScore)
+        select(Parcel, DealScore, lng_expr.label("lng"), lat_expr.label("lat"))
         .join(DealScore, DealScore.parcel_id == Parcel.id)
         .where(DealScore.total_score >= min_score)
         .order_by(desc(DealScore.total_score))
@@ -39,7 +42,8 @@ async def list_deals(
     rows = result.all()
 
     deals = []
-    for parcel, score in rows:
+    for row in rows:
+        parcel, score, lng, lat = row[0], row[1], row[2], row[3]
         deals.append({
             "id": str(parcel.id),
             "parcel_id": parcel.parcel_id,
@@ -51,6 +55,8 @@ async def list_deals(
             "zoning_code": parcel.zoning_code,
             "last_sale_date": parcel.last_sale_date.isoformat() if parcel.last_sale_date else None,
             "last_sale_price": parcel.last_sale_price,
+            "lng": float(lng) if lng is not None else None,
+            "lat": float(lat) if lat is not None else None,
             "scores": {
                 "waterfront":        float(score.waterfront_score or 0),
                 "zoning":            float(score.zoning_score or 0),
