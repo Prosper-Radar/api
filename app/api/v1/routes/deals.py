@@ -14,7 +14,7 @@ router = APIRouter(prefix="/deals", tags=["deals"])
 
 @router.get("")
 async def list_deals(
-    tier: Optional[str] = Query(None, regex="^[ABC]$"),
+    tier: Optional[str] = Query(None, pattern="^[ABC]$"),
     county: Optional[str] = None,
     min_score: float = 0,
     limit: int = Query(50, le=200),
@@ -68,6 +68,7 @@ async def list_deals(
                 "total":             float(score.total_score or 0),
             },
             "tier": score.tier,
+            "missing_metrics": [],  # populated after scoring engine upgrade
         })
 
     return {"deals": deals, "meta": {"offset": offset, "limit": limit}}
@@ -119,9 +120,14 @@ async def get_deal(deal_id: UUID, db: AsyncSession = Depends(get_db)):
 async def add_to_watchlist(
     deal_id: UUID,
     notes: Optional[str] = None,
+    added_by: str = Query("demo", description="User key — use real auth in production"),
     db: AsyncSession = Depends(get_db),
 ):
-    item = WatchlistItem(parcel_id=deal_id, added_by="jay", notes=notes)
+    """
+    Add a deal to the watchlist.
+    `added_by` is passed as a query param for now; wire to JWT sub in Sprint 4.
+    """
+    item = WatchlistItem(parcel_id=deal_id, added_by=added_by, notes=notes)
     db.add(item)
     await db.commit()
-    return {"status": "added", "id": str(item.id)}
+    return {"status": "added", "id": str(item.id), "added_by": added_by}
