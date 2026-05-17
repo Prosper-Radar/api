@@ -101,7 +101,7 @@ def test_engine_full_data():
     )
     result = compute_score(inp)
     assert 0 <= result.total <= 100
-    assert result.missing == []
+    assert result.missing_metrics == []
 
 
 def test_engine_missing_water():
@@ -122,9 +122,9 @@ def test_engine_missing_water():
     )
     result = compute_score(inp)
     assert 0 <= result.total <= 100
-    assert "waterfront" in result.missing
-    assert "population_growth" in result.missing
-    assert "traffic" in result.missing
+    assert "waterfront" in result.missing_metrics
+    assert "population_growth" in result.missing_metrics
+    assert "traffic" in result.missing_metrics
 
 
 # ─── Sync / dedup helpers ─────────────────────────────────────────────────────
