@@ -15,7 +15,7 @@ import logging
 from typing import Optional
 
 from geoalchemy2.shape import to_shape
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -23,13 +23,20 @@ from app.core.config import get_settings
 from app.db.models.deal_score import DealScore
 from app.db.models.parcel import Parcel
 from app.scoring.engine import ScoreBreakdown, ScoringInput, compute_score
+from app.scoring.version import MODEL_VERSION
 from app.services import census as census_svc
 from app.services import fdot as fdot_svc
 from app.services import water as water_svc
-from app.services import skiptrace as skiptrace_svc
 from app.services import email_alerts as alert_svc
+from app.worker.celery_app import dispatch
+from app.worker.tasks import skiptrace_task
 
 logger = logging.getLogger(__name__)
+
+
+async def _none():
+    """Coroutine no-op — remplace asyncio.coroutine() retiré en Python 3.11."""
+    return None
 
 
 async def _get_centroid(parcel: Parcel) -> Optional[tuple[float, float]]:
@@ -64,10 +71,19 @@ async def _gather_metrics(
         fdot_coro = fdot_svc.get_aadt(lon, lat)
     else:
         # No geometry → skip external services
-        census_coro = asyncio.coroutine(lambda: None)()
-        fdot_coro = asyncio.coroutine(lambda: None)()
+        census_coro = _none()
+        fdot_coro = _none()
 
     results = await asyncio.gather(water_coro, census_coro, fdot_coro, return_exceptions=True)
+
+    # Si une requête DB a échoué, asyncpg marque la transaction comme abortée.
+    # On rollback immédiatement pour remettre la session dans un état propre
+    # avant de tenter l'INSERT des scores.
+    if any(isinstance(r, Exception) for r in results):
+        try:
+            await db.rollback()
+        except Exception:
+            pass
 
     def _unwrap(val):
         if isinstance(val, Exception):
@@ -117,6 +133,7 @@ async def score_parcel(
             recency_score=breakdown.sale_recency,
             total_score=breakdown.total,
             tier=breakdown.tier,
+            model_version=MODEL_VERSION,
         )
         .on_conflict_do_update(
             index_elements=["parcel_id"],
@@ -130,6 +147,8 @@ async def score_parcel(
                 "recency_score": breakdown.sale_recency,
                 "total_score": breakdown.total,
                 "tier": breakdown.tier,
+                "model_version": MODEL_VERSION,
+                "computed_at": func.now(),
             },
         )
     )
@@ -139,13 +158,9 @@ async def score_parcel(
     if breakdown.tier == "A":
         settings = get_settings()
 
-        # 1. Skip tracing (fire-and-forget — don't block scoring)
+        # 1. Skip tracing — session DB indépendante via Celery (ou inline si pas de broker)
         if parcel.owner_name:
-            asyncio.create_task(skiptrace_svc.skip_trace_parcel(
-                db=db,
-                parcel_id=str(parcel.id),
-                owner_name_raw=parcel.owner_name,
-            ))
+            dispatch(skiptrace_task, str(parcel.id), parcel.owner_name)
 
         # 2. Email alert
         if settings.resend_api_key and settings.alert_email_to:
@@ -183,23 +198,35 @@ async def score_parcel(
     return breakdown
 
 
-async def run_score_computation(db: AsyncSession) -> int:
-    """Recompute scores for all parcels. Called as a background task."""
+async def run_score_computation() -> int:
+    """Recompute scores for all parcels. Called as a Starlette background task.
+
+    Creates its own DB session — the route's session is closed before this
+    background task executes, so we must not rely on an injected session.
+    """
+    from app.db.session import AsyncSessionLocal
+
     settings = get_settings()
-    result = await db.execute(select(Parcel))
-    parcels = result.scalars().all()
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(select(Parcel))
+        parcels = result.scalars().all()
 
     scored = 0
     errors = 0
 
     for parcel in parcels:
-        try:
-            await score_parcel(db, parcel, settings.census_api_key)
-            scored += 1
-        except Exception as exc:
-            errors += 1
-            logger.error("Failed to score parcel %s: %s", parcel.parcel_id, exc)
+        async with AsyncSessionLocal() as db:
+            try:
+                await score_parcel(db, parcel, settings.census_api_key)
+                scored += 1
+            except Exception as exc:
+                errors += 1
+                logger.error("Failed to score parcel %s: %s", parcel.parcel_id, exc)
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
 
-    await db.commit()
     logger.info("Score computation done: %d scored, %d errors", scored, errors)
     return scored

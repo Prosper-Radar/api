@@ -19,7 +19,7 @@ from app.core.config import get_settings
 logger = logging.getLogger(__name__)
 
 # Columns that should be preserved if the new value is NULL
-_COALESCE_COLS = {"geometry", "lat", "lng"}
+_COALESCE_COLS = {"geometry"}
 
 
 def _build_upsert_set(row: dict[str, Any]) -> dict[str, Any]:
@@ -73,7 +73,8 @@ async def upsert_parcels(db: AsyncSession, normalized: list[dict[str, Any]]) -> 
     return len(valid)
 
 
-async def run_miami_dade_sync(db: AsyncSession):
+async def run_miami_dade_sync():
+    from app.db.session import AsyncSessionLocal
     settings = get_settings()
     offset = 0
     batch_size = 100
@@ -94,7 +95,8 @@ async def run_miami_dade_sync(db: AsyncSession):
             break
 
         normalized = [miami_dade.normalize_parcel(p) for p in raw]
-        upserted = await upsert_parcels(db, normalized)
+        async with AsyncSessionLocal() as db:
+            upserted = await upsert_parcels(db, normalized)
         total += upserted
         logger.info("Miami-Dade sync: offset=%d upserted=%d", offset, upserted)
         offset += batch_size
@@ -102,7 +104,8 @@ async def run_miami_dade_sync(db: AsyncSession):
     return total
 
 
-async def run_hillsborough_sync(db: AsyncSession):
+async def run_hillsborough_sync():
+    from app.db.session import AsyncSessionLocal
     offset = 0
     batch_size = 100
     total = 0
@@ -118,7 +121,8 @@ async def run_hillsborough_sync(db: AsyncSession):
             break
 
         normalized = [hillsborough.normalize_parcel(p) for p in raw]
-        upserted = await upsert_parcels(db, normalized)
+        async with AsyncSessionLocal() as db:
+            upserted = await upsert_parcels(db, normalized)
         total += upserted
         logger.info("Hillsborough sync: offset=%d upserted=%d", offset, upserted)
         offset += batch_size
