@@ -4,6 +4,7 @@ from sqlalchemy.orm import relationship
 import uuid
 
 from app.db.base import Base
+from app.scoring.version import MODEL_VERSION
 
 
 class DealScore(Base):
@@ -20,6 +21,7 @@ class DealScore(Base):
     recency_score = Column(Numeric(5, 2))
     total_score = Column(Numeric(5, 2))
     tier = Column(String(1))  # 'A' | 'B' | 'C'
+    model_version = Column(String, nullable=False, server_default=MODEL_VERSION)
     computed_at = Column(DateTime(timezone=True), server_default=func.now())
 
     parcel = relationship("Parcel", backref="scores")
