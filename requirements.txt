@@ -21,6 +21,9 @@ bcrypt==5.0.0
 python-multipart==0.0.28
 # Rate limiting
 slowapi==0.1.9
+# Observabilité
+sentry-sdk[fastapi]
+structlog
 # Retry / backoff
 tenacity==9.1.2
 # PDF generation (Sprint 3)
