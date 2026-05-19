@@ -31,6 +31,16 @@ def _get_celery():
 _celery = _get_celery()
 
 if _celery is not None:
+    @_celery.task(name="tasks.skiptrace_parcel", bind=True, max_retries=3, default_retry_delay=30)
+    def skiptrace_task(self, parcel_id: str, owner_name_raw: str, oc_api_token: str = ""):
+        """Skip-trace un parcel Tier A — session DB indépendante."""
+        from app.services.skiptrace import skip_trace_parcel
+
+        try:
+            _run(skip_trace_parcel(parcel_id, owner_name_raw, oc_api_token))
+        except Exception as exc:
+            raise self.retry(exc=exc)
+
     @_celery.task(name="tasks.sync_county", bind=True, max_retries=3, default_retry_delay=60)
     def sync_county(self, county: str):
         """Fetch parcels from county scraper and upsert into DB."""
@@ -77,5 +87,6 @@ else:
         def delay(self, *a, **kw):
             logger.debug("Celery disabled — skipping background task")
 
+    skiptrace_task = _Stub()
     sync_county = _Stub()
     score_parcel = _Stub()
