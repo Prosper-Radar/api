@@ -1,5 +1,10 @@
 """
-Alembic env.py — async-compatible with SQLAlchemy + asyncpg.
+Alembic env.py — utilise psycopg2 (synchrone) pour les migrations.
+
+Pourquoi psycopg2 et non asyncpg :
+  Supabase utilise pgBouncer en mode transaction (port 6543), qui ne supporte
+  pas les prepared statements asyncpg. psycopg2 n'a pas cette limitation et
+  fonctionne parfaitement pour les migrations DDL synchrones.
 
 Run migrations:
   alembic upgrade head
@@ -7,32 +12,37 @@ Run migrations:
 Generate a new revision after model changes:
   alembic revision --autogenerate -m "describe change"
 """
-import asyncio
 import os
 from logging.config import fileConfig
 
+from dotenv import load_dotenv
+
+# Charger .env depuis la racine du repo api/
+load_dotenv()
+
 from alembic import context
-from sqlalchemy import pool
+from sqlalchemy import create_engine, pool
 from sqlalchemy.engine import Connection
-from sqlalchemy.ext.asyncio import async_engine_from_config
 
 # Import all models so Alembic sees them for autogenerate
 from app.db.base import Base  # noqa: F401
-import app.db.models.parcel       # noqa: F401
-import app.db.models.deal_score   # noqa: F401
+import app.db.models.parcel         # noqa: F401
+import app.db.models.deal_score     # noqa: F401
+import app.db.models.deal_pipeline  # noqa: F401
+import app.db.models.assembled_site # noqa: F401
 
 config = context.config
 
-# Override sqlalchemy.url from environment so we don't store creds in alembic.ini
+# Override sqlalchemy.url depuis l'environnement
 database_url = os.environ.get("DATABASE_URL", "")
 if database_url:
-    # asyncpg driver required
-    database_url = database_url.replace(
-        "postgresql://", "postgresql+asyncpg://"
-    ).replace(
-        "postgresql+psycopg2://", "postgresql+asyncpg://"
+    # Forcer psycopg2 pour les migrations (évite les problèmes pgBouncer/asyncpg)
+    sync_url = (
+        database_url
+        .replace("postgresql+asyncpg://", "postgresql+psycopg2://")
+        .replace("postgresql://", "postgresql+psycopg2://")
     )
-    config.set_main_option("sqlalchemy.url", database_url)
+    config.set_main_option("sqlalchemy.url", sync_url)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -59,21 +69,14 @@ def do_run_migrations(connection: Connection) -> None:
         context.run_migrations()
 
 
-async def run_async_migrations() -> None:
-    connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-        # Supabase uses pgBouncer in transaction mode — disable prepared stmt cache
-        connect_args={"statement_cache_size": 0},
-    )
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
-    await connectable.dispose()
-
-
 def run_migrations_online() -> None:
-    asyncio.run(run_async_migrations())
+    connectable = create_engine(
+        config.get_main_option("sqlalchemy.url"),
+        poolclass=pool.NullPool,
+    )
+    with connectable.connect() as connection:
+        do_run_migrations(connection)
+    connectable.dispose()
 
 
 if context.is_offline_mode():
