@@ -23,6 +23,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.owner_profile import OwnerProfile
+from app.db.session import AsyncSessionLocal
 from app.services.assembly import normalize_owner
 
 logger = logging.getLogger(__name__)
@@ -75,14 +76,12 @@ async def _sunbiz_search(name: str) -> Optional[dict]:
     Search Sunbiz by entity name. Returns parsed entity dict or None.
     Sunbiz returns an HTML table of results; we grab the first match.
     """
-    url = _SUNBIZ_SEARCH.format(name=httpx.URL(host="x").copy_with().params)
     try:
         async with httpx.AsyncClient(
             timeout=15.0,
             headers={"User-Agent": "DealScout/1.0 (prosper-group.com)"},
             follow_redirects=True,
         ) as client:
-            # Use params kwarg to encode properly
             resp = await client.get(
                 "https://search.sunbiz.org/Inquiry/CorporationSearch/SearchResults",
                 params={
@@ -107,6 +106,13 @@ async def _sunbiz_search(name: str) -> Optional[dict]:
         )
 
         if not rows:
+            # HTTP 200 mais parsing vide → structure HTML probablement changée
+            logger.error(
+                "Sunbiz returned 200 but no rows parsed for '%s'. "
+                "HTML structure may have changed. First 500 chars: %s",
+                name,
+                html[:500],
+            )
             return None
 
         # Take the first (most relevant) result
@@ -223,13 +229,14 @@ async def _opencorporates_search(name: str, api_token: str = "") -> Optional[dic
 # ---------------------------------------------------------------------------
 
 async def skip_trace_parcel(
-    db: AsyncSession,
     parcel_id: str,
     owner_name_raw: str,
     oc_api_token: str = "",
 ) -> Optional[OwnerProfile]:
     """
     Run skip tracing for a parcel and persist the result.
+
+    Ouvre sa propre session DB (ne partage pas la session de la task parente).
     Returns the OwnerProfile row (or None if all lookups failed).
     """
     if not owner_name_raw or owner_name_raw.strip().upper() in ("UNKNOWN", "N/A", ""):
@@ -256,9 +263,12 @@ async def skip_trace_parcel(
         officers=info.get("officers", []),
         source=info.get("source", "unknown"),
     )
-    db.add(profile)
-    await db.commit()
-    await db.refresh(profile)
+
+    async with AsyncSessionLocal() as db:
+        db.add(profile)
+        await db.commit()
+        await db.refresh(profile)
+
     logger.info(
         "Skip-traced parcel %s: %s (%s, %s officers)",
         parcel_id,

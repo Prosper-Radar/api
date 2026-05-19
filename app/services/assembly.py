@@ -16,10 +16,10 @@ Owner normalisation strips common LLC / corporate suffixes so that
 import logging
 import re
 import uuid as _uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 
-from sqlalchemy import text
+from sqlalchemy import delete, func, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -202,30 +202,61 @@ async def find_assemblies(db: AsyncSession) -> list[AssemblyResult]:
 
 async def persist_assemblies(db: AsyncSession) -> int:
     """
-    Compute and upsert all assembled sites.
-    Returns the number of assemblies written.
+    Compute et upsert les assembled sites de façon différentielle.
+
+    Stratégie : upsert par owner_name_normalized (clé unique métier),
+    puis suppression des assemblies qui n'existent plus dans le recompute.
+    Préserve les IDs existants → pas de FK orphelines.
+
+    Returns le nombre d'assemblies écrits.
     """
     assemblies = await find_assemblies(db)
 
     if not assemblies:
+        # Supprimer les anciens si aucun assembly trouvé (ex: parcels vidés)
+        await db.execute(delete(AssembledSite))
+        await db.commit()
         return 0
 
-    # Truncate and reinsert (full recompute strategy)
-    await db.execute(text("TRUNCATE TABLE assembled_sites"))
+    surviving_owner_keys: list[str] = []
 
     for a in assemblies:
-        site = AssembledSite(
-            id=_uuid.uuid4(),
-            owner_name_normalized=a.owner_name_normalized,
-            parcel_ids=a.parcel_ids,
-            parcel_count=a.parcel_count,
-            total_land_value=a.total_land_value,
-            total_lot_size_sqft=a.total_lot_size_sqft,
-            county=a.county,
-            geometry=a.geometry_ewkt,
+        stmt = (
+            insert(AssembledSite)
+            .values(
+                id=_uuid.uuid4(),
+                owner_name_normalized=a.owner_name_normalized,
+                parcel_ids=a.parcel_ids,
+                parcel_count=a.parcel_count,
+                total_land_value=a.total_land_value,
+                total_lot_size_sqft=a.total_lot_size_sqft,
+                county=a.county,
+                geometry=a.geometry_ewkt,
+                computed_at=func.now(),
+            )
+            .on_conflict_do_update(
+                index_elements=["owner_name_normalized"],
+                set_={
+                    "parcel_ids":         a.parcel_ids,
+                    "parcel_count":       a.parcel_count,
+                    "total_land_value":   a.total_land_value,
+                    "total_lot_size_sqft": a.total_lot_size_sqft,
+                    "county":             a.county,
+                    "geometry":           a.geometry_ewkt,
+                    "computed_at":        func.now(),
+                },
+            )
         )
-        db.add(site)
+        await db.execute(stmt)
+        surviving_owner_keys.append(a.owner_name_normalized)
+
+    # Supprimer les assemblies disparus du recompute
+    await db.execute(
+        delete(AssembledSite).where(
+            AssembledSite.owner_name_normalized.notin_(surviving_owner_keys)
+        )
+    )
 
     await db.commit()
-    logger.info("Persisted %d assembled sites.", len(assemblies))
+    logger.info("Persisted %d assembled sites (upsert).", len(assemblies))
     return len(assemblies)

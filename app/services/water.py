@@ -57,4 +57,10 @@ async def get_distance_to_water(
         return float(row.dist_m)
     except Exception as exc:  # table missing / geom null / SRID mismatch
         logger.warning("water-distance unavailable for parcel %s: %s", parcel_id, exc)
+        # Une erreur SQL (ex: colonne manquante) met asyncpg en état "transaction abortée".
+        # Rollback pour remettre la session dans un état sain avant la suite.
+        try:
+            await db.rollback()
+        except Exception:
+            pass
         return None

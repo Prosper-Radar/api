@@ -38,7 +38,7 @@ _AMBER  = (245, 158, 11)   # amber-500
 _RED    = (239, 68,  68)   # red-500
 _BORDER = (226, 232, 240)  # slate-200
 
-MODEL_VERSION = "v1.0"
+from app.scoring.version import MODEL_VERSION  # noqa: F401  (re-exported for pdf footer)
 
 
 def _tier_color(tier: str) -> tuple[int, int, int]:
