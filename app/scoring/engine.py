@@ -2,6 +2,8 @@ from datetime import date
 from dataclasses import dataclass
 from typing import Optional
 
+from app.scoring.tiers import total_to_tier
+
 # ---------------------------------------------------------------------------
 # Weights — must sum to 1.0
 # When a metric has no real data its weight is redistributed proportionally.
@@ -179,12 +181,7 @@ def compute_score(inp: ScoringInput) -> ScoreBreakdown:
         for k in available
     )
 
-    if total >= 70:
-        tier = "A"
-    elif total >= 45:
-        tier = "B"
-    else:
-        tier = "C"
+    tier = total_to_tier(total)
 
     return ScoreBreakdown(
         waterfront=round(available.get("waterfront"), 2) if "waterfront" in available else None,
