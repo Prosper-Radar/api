@@ -51,17 +51,15 @@ def _deep_links(owner_name: str | None, is_individual: bool = False) -> dict[str
         links["linkedin"] = (
             f"https://www.linkedin.com/search/results/people/?keywords={encoded}"
         )
-        links["google_email"] = (
-            f"https://www.google.com/search?q={up.quote_plus(f'\"{name}\" email OR contact Miami Florida')}"
-        )
+        google_email_q = up.quote_plus(f'"{name}" email OR contact Miami Florida')
+        links["google_email"] = f"https://www.google.com/search?q={google_email_q}"
         links["whitepages"] = (
             f"https://www.whitepages.com/name/{up.quote(name.replace(' ', '-'))}"
         )
     else:
         # For companies, target business directories
-        links["google_contact"] = (
-            f"https://www.google.com/search?q={up.quote_plus(f'\"{name}\" Miami Florida real estate contact')}"
-        )
+        google_contact_q = up.quote_plus(f'"{name}" Miami Florida real estate contact')
+        links["google_contact"] = f"https://www.google.com/search?q={google_contact_q}"
         links["linkedin_company"] = (
             f"https://www.linkedin.com/search/results/companies/?keywords={encoded}"
         )
