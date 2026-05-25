@@ -28,3 +28,5 @@ structlog
 tenacity==9.1.2
 # PDF generation (Sprint 3)
 fpdf2==2.8.3
+# AI — contact ranking (graceful if key not set)
+anthropic>=0.40.0
