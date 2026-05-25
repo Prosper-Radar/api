@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import get_db as get_session
 from app.db.models.owner_profile import OwnerProfile
-from app.services.skiptrace import skip_trace_parcel
+from app.services.skiptrace import skip_trace_parcel, rank_contacts_with_claude
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -72,9 +72,34 @@ def _deep_links(owner_name: str | None, is_individual: bool = False) -> dict[str
     return links
 
 
-def _profile_to_dict(profile: OwnerProfile, owner_name_raw: str | None = None) -> dict[str, Any]:
+async def _profile_to_dict(
+    profile: OwnerProfile,
+    owner_name_raw: str | None = None,
+    anthropic_api_key: str = "",
+) -> dict[str, Any]:
     name = profile.owner_name_raw or owner_name_raw or ""
     is_individual = (profile.entity_type or "").upper() == "INDIVIDUAL"
+
+    officers = profile.officers or []
+
+    # Claude ranking — identify best contact from officer list
+    top_contact = None
+    if officers and not is_individual:
+        candidate = await rank_contacts_with_claude(
+            officers=officers,
+            owner_name=name,
+            entity_name=profile.owner_name_normalized,
+            anthropic_api_key=anthropic_api_key,
+        )
+        if candidate:
+            top_contact = {
+                "name": candidate.name,
+                "role": candidate.role,
+                "confidence": candidate.confidence,
+                "reasoning": candidate.reasoning,
+                "source": candidate.source,
+            }
+
     return {
         "found": True,
         "owner_name_raw": profile.owner_name_raw,
@@ -85,12 +110,13 @@ def _profile_to_dict(profile: OwnerProfile, owner_name_raw: str | None = None) -
         "filing_date": profile.filing_date.isoformat() if profile.filing_date else None,
         "registered_agent": profile.registered_agent,
         "principal_address": profile.principal_address,
-        "officers": profile.officers or [],
+        "officers": officers,
+        "top_contact": top_contact,
         "source": profile.source,
         "fetched_at": profile.fetched_at.isoformat() if profile.fetched_at else None,
         "links": _deep_links(name, is_individual=is_individual),
         "contact_tip": (
-            "This is an individual owner — search LinkedIn or Whitepages for direct contact."
+            "Individual owner — search LinkedIn or Whitepages for direct contact."
             if is_individual else
             "Check the officers list above for direct contacts within this entity."
         ),
@@ -129,6 +155,7 @@ async def get_deal_contact(
     owner_name: str = parcel["owner_name"] or ""
 
     # ── 2. Check cache ───────────────────────────────────────────────────────
+    settings = get_settings()
     if not refresh:
         result = await db.execute(
             select(OwnerProfile)
@@ -138,7 +165,7 @@ async def get_deal_contact(
         )
         cached = result.scalars().first()
         if cached:
-            return _profile_to_dict(cached, owner_name)
+            return await _profile_to_dict(cached, owner_name, settings.anthropic_api_key)
 
     # ── 3. Run skip trace ────────────────────────────────────────────────────
     if not owner_name or owner_name.strip().upper() in ("UNKNOWN", "N/A", ""):
@@ -149,7 +176,7 @@ async def get_deal_contact(
         }
 
     try:
-        oc_token = getattr(get_settings(), "opencorporates_api_key", "")
+        oc_token = getattr(settings, "opencorporates_api_key", "")
         profile = await skip_trace_parcel(
             db=db,
             parcel_id=str(parcel_uuid),
@@ -161,7 +188,7 @@ async def get_deal_contact(
         profile = None
 
     if profile:
-        return _profile_to_dict(profile, owner_name)
+        return await _profile_to_dict(profile, owner_name, settings.anthropic_api_key)
 
     # ── 4. Fallback — links only ─────────────────────────────────────────────
     # Guess if it's an individual (no LLC/CORP/etc. in name)
